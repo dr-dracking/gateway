@@ -1,15 +1,21 @@
 import { Body, Controller, Delete, Get, Inject, Param, ParseUUIDPipe, Patch, Post, Query } from '@nestjs/common';
 import { ClientProxy, RpcException } from '@nestjs/microservices';
-import { catchError } from 'rxjs';
+import { catchError, tap } from 'rxjs';
 import { Auth, User } from 'src/auth/decorators';
 import { CurrentUser, Role } from 'src/auth/interfaces';
 import { PaginationDto } from 'src/common';
 import { NATS_SERVICE } from 'src/config';
 import { CreateUserDto, UpdateUserDto } from './dto';
+import { CACHE_MANAGER, Cache } from '@nestjs/cache-manager';
+
+const CACHE_TIME = 8.64e7; // 24 hours
 
 @Controller('users')
 export class UsersController {
-  constructor(@Inject(NATS_SERVICE) private readonly client: ClientProxy) {}
+  constructor(
+    @Inject(NATS_SERVICE) private readonly client: ClientProxy,
+    @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
+  ) {}
 
   @Get('health')
   health() {
@@ -42,40 +48,94 @@ export class UsersController {
 
   @Get(':id')
   @Auth(Role.Admin, Role.Moderator)
-  findOne(@Param('id', ParseUUIDPipe) id: string) {
+  async findOne(@Param('id', ParseUUIDPipe) id: string) {
+    const cacheKey = `user_${id}`;
+    const cachedUser = await this.cacheManager.get(cacheKey);
+
+    if (cachedUser) return cachedUser;
+
     return this.client.send('users.find.id', { id }).pipe(
       catchError((error) => {
         throw new RpcException(error);
+      }),
+
+      tap(async (user) => {
+        await this.cacheManager.set(cacheKey, user, CACHE_TIME); // 24 hours
       }),
     );
   }
 
   @Get('username/:username')
   @Auth(Role.Admin, Role.Moderator)
-  findByUsername(@Param('username') username: string) {
+  async findByUsername(@Param('username') username: string) {
+    const cachedUser = await this.cacheManager.get(username);
+
+    if (cachedUser) return cachedUser;
+
     return this.client.send('users.find.username', { username }).pipe(
       catchError((error) => {
         throw new RpcException(error);
+      }),
+
+      tap(async (user) => {
+        await this.cacheManager.set(username, user, CACHE_TIME); // 24 hours
       }),
     );
   }
 
   @Get('email/:email')
   @Auth(Role.Admin, Role.Moderator)
-  findByEmail(@Param('email') email: string) {
+  async findByEmail(@Param('email') email: string) {
+    const cacheKey = `user_${email}`;
+    const cachedUser = await this.cacheManager.get(cacheKey);
+
+    if (cachedUser) return cachedUser;
+
     return this.client.send('users.find.email', { email }).pipe(
       catchError((error) => {
         throw new RpcException(error);
+      }),
+
+      tap(async (user) => {
+        await this.cacheManager.set(cacheKey, user, CACHE_TIME); // 24 hours
       }),
     );
   }
 
   @Get('meta/:id')
   @Auth(Role.Admin, Role.Moderator)
-  findMeta(@Param('id', ParseUUIDPipe) id: string) {
+  async findMeta(@Param('id', ParseUUIDPipe) id: string) {
+    const cacheKey = `user_meta_${id}`;
+    const cachedMeta = await this.cacheManager.get(cacheKey);
+
+    if (cachedMeta) return cachedMeta;
+
     return this.client.send('users.find.meta', { id }).pipe(
       catchError((error) => {
         throw new RpcException(error);
+      }),
+
+      tap(async (meta) => {
+        await this.cacheManager.set(cacheKey, meta, CACHE_TIME); // 24 hours
+      }),
+    );
+  }
+
+  @Get('summary/:id')
+  @Auth(Role.Admin, Role.Moderator)
+  async findSummary(@Param('id', ParseUUIDPipe) id: string) {
+    const cacheKey = `user_summary_${id}`;
+    const cachedMeta = await this.cacheManager.get(cacheKey);
+
+    if (cachedMeta) return cachedMeta;
+
+    return this.client.send('users.find.summary', { id }).pipe(
+      catchError((error) => {
+        throw new RpcException(error);
+      }),
+
+      tap(async (meta) => {
+        await this.cacheManager.set(cacheKey, meta, CACHE_TIME); // 24 hours
       }),
     );
   }
@@ -87,6 +147,9 @@ export class UsersController {
       catchError((error) => {
         throw new RpcException(error);
       }),
+      tap(async () => {
+        await this.removeUserCache(updateUserDto.id);
+      }),
     );
   }
 
@@ -96,6 +159,9 @@ export class UsersController {
     return this.client.send('users.remove', { id }).pipe(
       catchError((error) => {
         throw new RpcException(error);
+      }),
+      tap(async () => {
+        await this.removeUserCache(id);
       }),
     );
   }
@@ -107,6 +173,15 @@ export class UsersController {
       catchError((error) => {
         throw new RpcException(error);
       }),
+
+      tap(async () => {
+        await this.removeUserCache(id);
+      }),
     );
+  }
+
+  private async removeUserCache(id: string) {
+    await this.cacheManager.del(`user_${id}`);
+    await this.cacheManager.del(`user_meta_${id}`);
   }
 }
