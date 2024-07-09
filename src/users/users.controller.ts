@@ -1,12 +1,13 @@
+import { ObjectManipulator } from 'src/helpers';
+import { CACHE_MANAGER, Cache } from '@nestjs/cache-manager';
 import { Body, Controller, Delete, Get, Inject, Param, ParseUUIDPipe, Patch, Post, Query } from '@nestjs/common';
 import { ClientProxy, RpcException } from '@nestjs/microservices';
-import { catchError, tap } from 'rxjs';
+import { catchError, firstValueFrom, tap } from 'rxjs';
 import { Auth, User } from 'src/auth/decorators';
 import { CurrentUser, Role } from 'src/auth/interfaces';
 import { PaginationDto } from 'src/common';
 import { NATS_SERVICE } from 'src/config';
 import { CreateUserDto, UpdateUserDto } from './dto';
-import { CACHE_MANAGER, Cache } from '@nestjs/cache-manager';
 
 const CACHE_TIME = 8.64e7; // 24 hours
 
@@ -33,23 +34,35 @@ export class UsersController {
       catchError((error) => {
         throw new RpcException(error);
       }),
+      tap(async (newUser) => {
+        // Update cache with the new user data
+        await this.cacheManager.set(`user:${newUser.id}`, newUser, CACHE_TIME);
+        // Invalidate user list cache
+        await this.invalidateUserListCache();
+      }),
     );
   }
 
   @Get()
   @Auth(Role.Admin, Role.Moderator)
-  findAll(@Query() paginationDto: PaginationDto, @User() user: CurrentUser) {
+  async findAll(@Query() paginationDto: PaginationDto, @User() user: CurrentUser) {
+    const cacheKey = this.getUserListCacheKey(paginationDto);
+    const cachedUsers = await this.cacheManager.get(cacheKey);
+
+    if (cachedUsers) return cachedUsers;
+
     return this.client.send('users.findAll', { paginationDto, user }).pipe(
       catchError((error) => {
         throw new RpcException(error);
       }),
+      tap(async (users) => await this.cacheManager.set(cacheKey, users, CACHE_TIME)),
     );
   }
 
   @Get(':id')
   @Auth(Role.Admin, Role.Moderator)
   async findOne(@Param('id', ParseUUIDPipe) id: string) {
-    const cacheKey = `user_${id}`;
+    const cacheKey = `user:${id}`;
     const cachedUser = await this.cacheManager.get(cacheKey);
 
     if (cachedUser) return cachedUser;
@@ -59,16 +72,15 @@ export class UsersController {
         throw new RpcException(error);
       }),
 
-      tap(async (user) => {
-        await this.cacheManager.set(cacheKey, user, CACHE_TIME); // 24 hours
-      }),
+      tap(async (user) => await this.cacheManager.set(cacheKey, user, CACHE_TIME)),
     );
   }
 
   @Get('username/:username')
   @Auth(Role.Admin, Role.Moderator)
   async findByUsername(@Param('username') username: string) {
-    const cachedUser = await this.cacheManager.get(username);
+    const cacheKey = `user:${username}`;
+    const cachedUser = await this.cacheManager.get(cacheKey);
 
     if (cachedUser) return cachedUser;
 
@@ -77,16 +89,14 @@ export class UsersController {
         throw new RpcException(error);
       }),
 
-      tap(async (user) => {
-        await this.cacheManager.set(username, user, CACHE_TIME); // 24 hours
-      }),
+      tap(async (user) => await this.cacheManager.set(cacheKey, user, CACHE_TIME)),
     );
   }
 
   @Get('email/:email')
   @Auth(Role.Admin, Role.Moderator)
   async findByEmail(@Param('email') email: string) {
-    const cacheKey = `user_${email}`;
+    const cacheKey = `user:${email}`;
     const cachedUser = await this.cacheManager.get(cacheKey);
 
     if (cachedUser) return cachedUser;
@@ -96,16 +106,14 @@ export class UsersController {
         throw new RpcException(error);
       }),
 
-      tap(async (user) => {
-        await this.cacheManager.set(cacheKey, user, CACHE_TIME); // 24 hours
-      }),
+      tap(async (user) => await this.cacheManager.set(cacheKey, user, CACHE_TIME)),
     );
   }
 
   @Get('meta/:id')
   @Auth(Role.Admin, Role.Moderator)
   async findMeta(@Param('id', ParseUUIDPipe) id: string) {
-    const cacheKey = `user_meta_${id}`;
+    const cacheKey = `user:meta:${id}`;
     const cachedMeta = await this.cacheManager.get(cacheKey);
 
     if (cachedMeta) return cachedMeta;
@@ -115,16 +123,14 @@ export class UsersController {
         throw new RpcException(error);
       }),
 
-      tap(async (meta) => {
-        await this.cacheManager.set(cacheKey, meta, CACHE_TIME); // 24 hours
-      }),
+      tap(async (user) => await this.cacheManager.set(cacheKey, user, CACHE_TIME)),
     );
   }
 
   @Get('summary/:id')
   @Auth(Role.Admin, Role.Moderator)
   async findSummary(@Param('id', ParseUUIDPipe) id: string) {
-    const cacheKey = `user_summary_${id}`;
+    const cacheKey = `user:summary:${id}`;
     const cachedMeta = await this.cacheManager.get(cacheKey);
 
     if (cachedMeta) return cachedMeta;
@@ -134,21 +140,29 @@ export class UsersController {
         throw new RpcException(error);
       }),
 
-      tap(async (meta) => {
-        await this.cacheManager.set(cacheKey, meta, CACHE_TIME); // 24 hours
-      }),
+      tap(async (user) => await this.cacheManager.set(cacheKey, user, CACHE_TIME)),
     );
   }
 
   @Patch()
   @Auth(Role.Admin, Role.Moderator)
-  update(@Body() updateUserDto: UpdateUserDto) {
+  async update(@Body() updateUserDto: UpdateUserDto) {
+    const existingUser = await firstValueFrom(this.client.send('users.find.id', { id: updateUserDto.id }));
+
     return this.client.send('users.update', updateUserDto).pipe(
       catchError((error) => {
         throw new RpcException(error);
       }),
-      tap(async () => {
-        await this.removeUserCache(updateUserDto.id);
+      tap(async (user: CurrentUser) => {
+        await this.invalidateUserListCache();
+
+        // Invalidate cache if username or email has changed to prevent stale data
+        existingUser.username !== updateUserDto.username || existingUser.email !== updateUserDto.email
+          ? await this.invalidateUserCache(existingUser)
+          : await this.invalidateUserCache(user);
+
+        // Update cache with the new user data
+        await this.setNewUserCache(user);
       }),
     );
   }
@@ -160,8 +174,10 @@ export class UsersController {
       catchError((error) => {
         throw new RpcException(error);
       }),
-      tap(async () => {
-        await this.removeUserCache(id);
+      tap(async (user: CurrentUser) => {
+        await this.invalidateUserListCache();
+        await this.invalidateUserCache(user);
+        await this.setNewUserCache(user);
       }),
     );
   }
@@ -173,15 +189,39 @@ export class UsersController {
       catchError((error) => {
         throw new RpcException(error);
       }),
-
-      tap(async () => {
-        await this.removeUserCache(id);
+      tap(async (user: CurrentUser) => {
+        await this.invalidateUserListCache();
+        await this.invalidateUserCache(user);
+        await this.setNewUserCache(user);
       }),
     );
   }
 
-  private async removeUserCache(id: string) {
-    await this.cacheManager.del(`user_${id}`);
-    await this.cacheManager.del(`user_meta_${id}`);
+  private getUserListCacheKey(paginationDto: PaginationDto): string {
+    return `users:page:${paginationDto.page}:limit:${paginationDto.limit}`;
+  }
+
+  private async invalidateUserListCache() {
+    // Implement a strategy to invalidate user list cache.
+    // This could be a loop through known pagination keys if predictable or a naming convention.
+    const keys = await this.cacheManager.store.keys(`users:*`);
+    for (const key of keys) await this.cacheManager.del(key);
+  }
+
+  private async invalidateUserCache(user: CurrentUser) {
+    await this.cacheManager.del(`user:${user.id}`);
+    await this.cacheManager.del(`user:meta:${user.id}`);
+    await this.cacheManager.del(`user:summary:${user.id}`);
+
+    await this.cacheManager.del(`user:${user.username}`);
+    await this.cacheManager.del(`user:${user.email}`);
+  }
+
+  private async setNewUserCache(newUser: CurrentUser) {
+    const user = ObjectManipulator.exclude(newUser, ['password']);
+
+    await this.cacheManager.set(`user:${user.id}`, user, CACHE_TIME);
+    await this.cacheManager.set(`user:${user.username}`, user, CACHE_TIME);
+    await this.cacheManager.set(`user:${user.email}`, user, CACHE_TIME);
   }
 }
