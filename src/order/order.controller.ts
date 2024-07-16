@@ -114,7 +114,7 @@ export class OrderController {
   }
 
   @Patch('restore/:id')
-  @Auth(Role.Admin, Role.Moderator)
+  @Auth(Role.Admin)
   restore(@Param('id', ParseUUIDPipe) id: string, @User() user: CurrentUser) {
     return this.client.send('order.restore', { id, user }).pipe(
       catchError((error) => {
@@ -128,7 +128,7 @@ export class OrderController {
   }
 
   private getOrderListCacheKey(paginationDto: PaginationDto): string {
-    return `products:page:${paginationDto.page}:limit:${paginationDto.limit}`;
+    return `orders:page:${paginationDto.page}:limit:${paginationDto.limit}`;
   }
 
   private async clearOrderListCache() {

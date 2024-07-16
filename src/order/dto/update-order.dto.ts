@@ -1,8 +1,11 @@
-import { PartialType } from '@nestjs/mapped-types';
-import { CreateOrderDto } from './create-order.dto';
-import { IsUUID } from 'class-validator';
+import { IsEnum, IsNotEmpty, IsUUID } from 'class-validator';
+import { OrderStatus } from '../interfaces';
 
-export class UpdateOrderDto extends PartialType(CreateOrderDto) {
+export class UpdateOrderDto {
   @IsUUID()
   id: string;
+
+  @IsEnum(OrderStatus)
+  @IsNotEmpty()
+  status: OrderStatus;
 }
